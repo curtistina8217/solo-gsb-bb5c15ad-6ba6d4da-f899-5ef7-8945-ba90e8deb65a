@@ -6,8 +6,13 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .imposition import build_imposition
-from .schemas import ImpositionRequest, ImpositionResponse
+from .imposition import build_imposition, build_reprint
+from .schemas import (
+    ImpositionRequest,
+    ImpositionResponse,
+    ReprintRequest,
+    ReprintResponse,
+)
 
 app = FastAPI(
     title="骑马钉小册子拼版 API",
@@ -19,8 +24,9 @@ app = FastAPI(
 )
 
 
-def _format_validation_errors(errors: list[dict]) -> list[dict]:
+def _format_validation_errors(errors: list[dict], path: str = "") -> list[dict]:
     """把 Pydantic 校验错误整理成简洁的中文说明。"""
+    is_reprint = path.startswith("/api/v1/reprint")
     formatted: list[dict] = []
     for err in errors:
         loc = [
@@ -46,6 +52,18 @@ def _format_validation_errors(errors: list[dict]) -> list[dict]:
             message = "存在不支持的多余字段。"
         elif err_type == "missing":
             message = "缺少必填参数。"
+        elif err_type in {"model_type", "model_attributes_type"}:
+            raw_loc = err.get("loc", ())
+            if len(raw_loc) >= 2 and "damaged_ranges" in raw_loc:
+                message = "受损页区间列表的每一项都必须是含 start_page、end_page 的对象。"
+            elif field == "damaged_ranges":
+                message = "damaged_ranges 必须是区间对象组成的列表。"
+        elif err_type == "list_type":
+            message = "damaged_ranges 必须是区间对象组成的非空列表。"
+        elif err_type in {"too_short", "string_too_short"}:
+            message = "damaged_ranges 不能为空，至少提供一个受损页区间。"
+        elif err_type in {"reversed_range", "page_out_of_range"}:
+            message = message.removeprefix("Value error, ")
 
         formatted.append({"field": field, "message": message})
     return formatted
@@ -55,13 +73,23 @@ def _format_validation_errors(errors: list[dict]) -> list[dict]:
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """非正整数 / 类型错误统一返回 HTTP 400 与明确错误信息。"""
+    """类型 / 范围 / 区间错误统一返回 HTTP 400 与明确错误信息。"""
+    is_reprint = request.url.path.startswith("/api/v1/reprint")
+    if is_reprint:
+        message = (
+            "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，"
+            "damaged_ranges 必须为非空的有效受损页区间列表。"
+        )
+    else:
+        message = (
+            "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数。"
+        )
     return JSONResponse(
         status_code=400,
         content={
             "error": "invalid_input",
-            "message": "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数。",
-            "details": _format_validation_errors(exc.errors()),
+            "message": message,
+            "details": _format_validation_errors(exc.errors(), request.url.path),
         },
     )
 
@@ -73,6 +101,7 @@ async def root() -> dict:
         "docs": "/docs",
         "health": "/health",
         "impose_endpoint": "/api/v1/impose",
+        "reprint_endpoint": "/api/v1/reprint",
     }
 
 
@@ -110,3 +139,20 @@ async def impose_get(
     # 查询参数的类型 / 范围错误同样由 validation_exception_handler 统一返回 400。
     result = build_imposition(total_pages, max_sheets_per_booklet)
     return ImpositionResponse.model_validate(result)
+
+
+@app.post(
+    "/api/v1/reprint",
+    response_model=ReprintResponse,
+    tags=["reprint"],
+    summary="按受损页区间定位需补印的整张纸",
+)
+async def reprint(payload: ReprintRequest) -> ReprintResponse:
+    result = build_reprint(
+        total_pages=payload.total_pages,
+        max_sheets_per_booklet=payload.max_sheets_per_booklet,
+        damaged_ranges=[
+            (item.start_page, item.end_page) for item in payload.damaged_ranges
+        ],
+    )
+    return ReprintResponse.model_validate(result)

@@ -2,7 +2,12 @@
 
 import unittest
 
-from app.imposition import build_imposition, impose_padded_booklet, split_booklets
+from app.imposition import (
+    build_imposition,
+    build_reprint,
+    impose_padded_booklet,
+    split_booklets,
+)
 
 
 class TestSplitBooklets(unittest.TestCase):
@@ -185,6 +190,86 @@ class TestBuildImposition(unittest.TestCase):
         self.assertEqual(result["max_sheets_per_booklet"], 2)
         self.assertEqual(result["booklet_count"], 3)
         self.assertEqual(result["total_sheets"], 2 + 2 + 1)
+
+
+class TestBuildReprint(unittest.TestCase):
+    def test_single_damaged_page_locates_outer_sheet(self):
+        # 16 页 1 册 4 张纸：第 1 页位于最外一张正面右
+        result = build_reprint(16, 4, [(1, 1)])
+        self.assertEqual(result["reprint_sheet_count"], 1)
+        self.assertEqual(result["booklet_count"], 1)
+        sheet = result["sheets"][0]
+        self.assertEqual((sheet["booklet_index"], sheet["sheet_index"]), (0, 0))
+        self.assertEqual(sheet["front"], {"left": 16, "right": 1})
+        self.assertEqual(sheet["back"], {"left": 2, "right": 15})
+        self.assertEqual(sheet["damaged_pages"], [1])
+
+    def test_range_spanning_multiple_sheets_and_sides(self):
+        # 16 页：受损 1..4 -> 外纸（1,2）与第二张（3,4）
+        result = build_reprint(16, 4, [(1, 4)])
+        self.assertEqual(result["reprint_sheet_count"], 2)
+        self.assertEqual(
+            [(s["booklet_index"], s["sheet_index"]) for s in result["sheets"]],
+            [(0, 0), (0, 1)],
+        )
+        self.assertEqual(result["sheets"][0]["damaged_pages"], [1, 2])
+        self.assertEqual(result["sheets"][1]["damaged_pages"], [3, 4])
+
+    def test_overlapping_ranges_dedupe_sheets_and_pages(self):
+        result = build_reprint(16, 4, [(1, 3), (2, 4)])
+        # 并集仍为 1..4，落在外两张纸；交叠区间不产生重复纸张
+        self.assertEqual(result["reprint_sheet_count"], 2)
+        self.assertEqual(result["sheets"][0]["damaged_pages"], [1, 2])
+        self.assertEqual(result["sheets"][1]["damaged_pages"], [3, 4])
+
+    def test_sorting_outer_to_inner(self):
+        # 16 页：第 11 页落在第三张（index 2），第 9 页落在最内一张（index 3）
+        result = build_reprint(16, 4, [(11, 11), (9, 9)])
+        self.assertEqual(
+            [(s["sheet_index"], s["damaged_pages"]) for s in result["sheets"]],
+            [(2, [11]), (3, [9])],
+        )
+
+    def test_multi_booklet_sorting_and_indices(self):
+        # 17 页、每册 2 张纸（8 页）-> 3 册：受损第 8 页（册0最外纸）与第 9 页（册1最外纸）
+        result = build_reprint(17, 2, [(8, 9)])
+        self.assertEqual(result["booklet_count"], 3)
+        self.assertEqual(result["reprint_sheet_count"], 2)
+        first, second = result["sheets"]
+        self.assertEqual((first["booklet_index"], first["sheet_index"]), (0, 0))
+        self.assertEqual(first["damaged_pages"], [8])
+        self.assertEqual((second["booklet_index"], second["sheet_index"]), (1, 0))
+        self.assertEqual(second["damaged_pages"], [9])
+        # 最后一册存在补白，但不受损、不出现在结果中
+        self.assertTrue(all(s["booklet_index"] != 2 for s in result["sheets"]))
+
+    def test_padding_blanks_are_null_but_never_listed_as_damaged(self):
+        # 5 页补齐到 8：受损第 5 页 -> 内纸（index 1），外封补白不受影响
+        result = build_reprint(5, 10, [(5, 5)])
+        self.assertEqual(result["reprint_sheet_count"], 1)
+        sheet = result["sheets"][0]
+        self.assertEqual(sheet["sheet_index"], 1)
+        self.assertEqual(sheet["front"], {"left": None, "right": 3})
+        self.assertEqual(sheet["back"], {"left": 4, "right": 5})
+        self.assertEqual(sheet["damaged_pages"], [5])
+
+    def test_all_pages_damaged_returns_every_sheet_once(self):
+        result = build_reprint(17, 2, [(1, 17)])
+        self.assertEqual(result["reprint_sheet_count"], 2 + 2 + 1)
+        # 结果按分册序号、纸张从外到内
+        keys = [(s["booklet_index"], s["sheet_index"]) for s in result["sheets"]]
+        self.assertEqual(
+            keys,
+            [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)],
+        )
+        # 每个原稿页都恰好出现在某张纸的 damaged_pages 中一次
+        listed = [p for s in result["sheets"] for p in s["damaged_pages"]]
+        self.assertEqual(sorted(listed), list(range(1, 18)))
+
+    def test_summary_fields(self):
+        result = build_reprint(16, 4, [(15, 16)])
+        self.assertEqual(result["total_pages"], 16)
+        self.assertEqual(result["max_sheets_per_booklet"], 4)
 
 
 if __name__ == "__main__":

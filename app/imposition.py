@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -144,4 +145,57 @@ def build_imposition(total_pages: int, max_sheets_per_booklet: int) -> dict:
         "booklet_count": len(booklets),
         "total_sheets": sum(b.sheet_count for b in booklets),
         "booklets": result_booklets,
+    }
+
+
+def build_reprint(
+    total_pages: int,
+    max_sheets_per_booklet: int,
+    damaged_ranges: Iterable[tuple[int, int]],
+) -> dict:
+    """按现有分册与拼版规则，定位承载受损原稿页的整张纸（补印清单）。
+
+    ``damaged_ranges`` 为若干 ``(start_page, end_page)`` 闭区间（1-based），
+    调用方（schema 层）需已保证区间非倒置、未越界且列表非空。
+
+    - 区间允许相互交叠：同一纸张只返回一次；
+    - 结果按分册序号升序、同册纸张从外到内（序号升序）排列；
+    - 每张纸给出正反面左右原稿页码（补白为 ``None``）以及落在该纸上的、
+      去重升序排列的受损页码。
+    """
+    damaged_pages: set[int] = set()
+    for start, end in damaged_ranges:
+        damaged_pages.update(range(start, end + 1))
+
+    imposition = build_imposition(total_pages, max_sheets_per_booklet)
+    sheets_out: list[dict] = []
+
+    for booklet in imposition["booklets"]:
+        for sheet in booklet["sheets"]:
+            page_positions = (
+                sheet["front"]["left"],
+                sheet["front"]["right"],
+                sheet["back"]["left"],
+                sheet["back"]["right"],
+            )
+            hit = sorted(p for p in page_positions if p in damaged_pages)
+            if not hit:
+                continue
+            # build_imposition 的输出本就按分册序号、纸张从外到内排列。
+            sheets_out.append(
+                {
+                    "booklet_index": booklet["index"],
+                    "sheet_index": sheet["index"],
+                    "front": sheet["front"],
+                    "back": sheet["back"],
+                    "damaged_pages": hit,
+                }
+            )
+
+    return {
+        "total_pages": total_pages,
+        "max_sheets_per_booklet": max_sheets_per_booklet,
+        "booklet_count": imposition["booklet_count"],
+        "reprint_sheet_count": len(sheets_out),
+        "sheets": sheets_out,
     }
