@@ -8,6 +8,9 @@
 3. 按纸张**从外到内**返回每张纸**正面（front）/反面（back）各自的左、右页码**，
    双面打印并对折后即可按原稿顺序翻阅。
 
+另提供**补印定位**接口：给定受损原稿页区间，按同一套分册与拼版规则找出需要
+**整张重印**的纸张（见 `POST /api/v1/reprint`）。
+
 > 1 张纸正反两面共 4 个版面，因此骑马钉册的页数永远是 4 的倍数。
 
 ---
@@ -61,6 +64,7 @@ HOST_PORT=9000
 | ReDoc 文档 | http://localhost:8000/redoc |
 | 拼版接口（POST） | `POST http://localhost:8000/api/v1/impose` |
 | 拼版接口（GET 便捷形式，可直接在浏览器打开） | `GET http://localhost:8000/api/v1/impose?total_pages=16&max_sheets_per_booklet=4` |
+| 补印定位接口（POST） | `POST http://localhost:8000/api/v1/reprint` |
 
 ## 4. 接口说明
 
@@ -173,6 +177,101 @@ curl -i -X POST http://localhost:8000/api/v1/impose \
 }
 ```
 
+### `POST /api/v1/reprint`
+
+原稿部分页受损（如水渍、撕页）时，按与拼版接口**相同的分册与拼版规则**，
+定位覆盖受损页、需要**整张重印**的纸：受损页落在哪张纸上，就重印哪一整张
+（正反面 4 个版面一起重印）。
+
+**请求体（JSON）**
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `total_pages` | 整数 | 必填，正整数 `>= 1` | 原稿总页数 |
+| `max_sheets_per_booklet` | 整数 | 必填，正整数 `>= 1` | 每册最多纸张数 |
+| `damaged_ranges` | 数组 | 必填，**至少 1 项** | 受损原稿页区间列表，每项含 `start_page` / `end_page`（1-based，**端点均包含**）；区间允许交叠，同一纸张只返回一次 |
+
+以下情况一律返回 **HTTP 400**：区间**倒置**（`start_page > end_page`）、
+**越界**（页码 `< 1` 或 `> total_pages`）、列表**为空**，以及非正整数 /
+类型错误 / 多余字段等（与拼版接口一致的校验规则）。
+
+请求示例（17 页、每册最多 2 张纸，第 8–10 页与第 17 页受损）：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/reprint \
+  -H "Content-Type: application/json" \
+  -d '{
+        "total_pages": 17,
+        "max_sheets_per_booklet": 2,
+        "damaged_ranges": [
+          { "start_page": 8,  "end_page": 10 },
+          { "start_page": 17, "end_page": 17 }
+        ]
+      }'
+```
+
+响应示例（17 页按 8 + 8 + 1 分为 3 册，需补印 3 张纸）：
+
+```json
+{
+  "total_pages": 17,
+  "max_sheets_per_booklet": 2,
+  "damaged_page_count": 4,
+  "reprint_sheet_count": 3,
+  "sheets": [
+    {
+      "booklet_index": 0,
+      "sheet_index": 0,
+      "front": { "left": 8,  "right": 1 },
+      "back":  { "left": 2,  "right": 7 },
+      "damaged_pages": [8]
+    },
+    {
+      "booklet_index": 1,
+      "sheet_index": 0,
+      "front": { "left": 16, "right": 9 },
+      "back":  { "left": 10, "right": 15 },
+      "damaged_pages": [9, 10]
+    },
+    {
+      "booklet_index": 2,
+      "sheet_index": 0,
+      "front": { "left": null, "right": 17 },
+      "back":  { "left": null, "right": null },
+      "damaged_pages": [17]
+    }
+  ]
+}
+```
+
+字段含义：
+
+- `sheets[]`：需补印的纸张，按**分册序号、纸张从外到内**排序，同一纸张只出现一次。
+- `booklet_index` / `sheet_index`：分册序号与该册内纸张序号（`0` 为最外侧一张纸），
+  与拼版接口返回的 `booklets[].index` / `sheets[].index` 一一对应。
+- `front` / `back`：该纸正反面左右**原稿页码**，补位空白页为 `null`。
+- `damaged_pages`：落在该纸上的受损原稿页码（升序、去重）。
+- `damaged_page_count`：合并交叠区间后的受损页总数；`reprint_sheet_count`：需补印纸张总数。
+
+错误响应示例（区间倒置）：
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/reprint \
+  -H "Content-Type: application/json" \
+  -d '{"total_pages": 16, "max_sheets_per_booklet": 4,
+       "damaged_ranges": [{"start_page": 5, "end_page": 3}]}'
+```
+
+```json
+{
+  "error": "invalid_input",
+  "message": "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，damaged_ranges 至少含 1 个不倒置且不越界的受损页区间。",
+  "details": [
+    { "field": "damaged_ranges.0", "message": "区间倒置：start_page（5）不能大于 end_page（3）。" }
+  ]
+}
+```
+
 ## 5. 拼版规则（打印与装订说明）
 
 对一册补齐到 `n` 页（`n` 为 4 的倍数）的小册子，从外到内第 `i` 张纸
@@ -214,8 +313,8 @@ python -m unittest discover -s tests -v
 .
 ├── app/
 │   ├── __init__.py
-│   ├── imposition.py      # 分册 / 补齐 / 拼版核心算法（纯标准库）
-│   ├── schemas.py         # Pydantic 请求与响应模型（正整数校验）
+│   ├── imposition.py      # 分册 / 补齐 / 拼版 / 补印定位核心算法（纯标准库）
+│   ├── schemas.py         # Pydantic 请求与响应模型（正整数与受损区间校验）
 │   └── main.py            # FastAPI 路由与 400 错误处理
 ├── tests/
 │   ├── test_imposition.py # 核心算法单元测试

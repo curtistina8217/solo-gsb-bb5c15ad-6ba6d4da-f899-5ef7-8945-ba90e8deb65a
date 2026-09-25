@@ -2,7 +2,12 @@
 
 import unittest
 
-from app.imposition import build_imposition, impose_padded_booklet, split_booklets
+from app.imposition import (
+    build_imposition,
+    find_reprint_sheets,
+    impose_padded_booklet,
+    split_booklets,
+)
 
 
 class TestSplitBooklets(unittest.TestCase):
@@ -185,6 +190,75 @@ class TestBuildImposition(unittest.TestCase):
         self.assertEqual(result["max_sheets_per_booklet"], 2)
         self.assertEqual(result["booklet_count"], 3)
         self.assertEqual(result["total_sheets"], 2 + 2 + 1)
+
+
+class TestFindReprintSheets(unittest.TestCase):
+    def test_single_range_hits_one_sheet(self):
+        # 16 页 / 4 张纸：第 3、4 页都在从外到内第 2 张纸（index 1）上
+        result = find_reprint_sheets(16, 4, [(3, 4)])
+        self.assertEqual(result["total_pages"], 16)
+        self.assertEqual(result["max_sheets_per_booklet"], 4)
+        self.assertEqual(result["damaged_page_count"], 2)
+        self.assertEqual(result["reprint_sheet_count"], 1)
+        sheet = result["sheets"][0]
+        self.assertEqual(sheet["booklet_index"], 0)
+        self.assertEqual(sheet["sheet_index"], 1)
+        self.assertEqual(sheet["front"], {"left": 14, "right": 3})
+        self.assertEqual(sheet["back"], {"left": 4, "right": 13})
+        self.assertEqual(sheet["damaged_pages"], [3, 4])
+
+    def test_overlapping_ranges_return_sheet_once(self):
+        # 交叠区间 [1,3] 与 [2,5] 合并为受损页 {1,2,3,4,5}
+        result = find_reprint_sheets(16, 4, [(1, 3), (2, 5)])
+        self.assertEqual(result["damaged_page_count"], 5)
+        self.assertEqual(result["reprint_sheet_count"], 3)
+        self.assertEqual(
+            [(s["booklet_index"], s["sheet_index"]) for s in result["sheets"]],
+            [(0, 0), (0, 1), (0, 2)],
+        )
+        self.assertEqual(result["sheets"][0]["damaged_pages"], [1, 2])
+        self.assertEqual(result["sheets"][1]["damaged_pages"], [3, 4])
+        self.assertEqual(result["sheets"][2]["damaged_pages"], [5])
+
+    def test_duplicate_range_still_returns_sheet_once(self):
+        result = find_reprint_sheets(16, 4, [(3, 4), (3, 4)])
+        self.assertEqual(result["reprint_sheet_count"], 1)
+        self.assertEqual(result["sheets"][0]["damaged_pages"], [3, 4])
+
+    def test_across_booklets_sorted_by_booklet_then_outer_to_inner(self):
+        # 17 页、每册 2 张纸 -> 3 册（8 + 8 + 1 页，末册补 3 个空白页）
+        result = find_reprint_sheets(17, 2, [(8, 10), (17, 17)])
+        self.assertEqual(
+            [(s["booklet_index"], s["sheet_index"]) for s in result["sheets"]],
+            [(0, 0), (1, 0), (2, 0)],
+        )
+        first, second, third = result["sheets"]
+        # 第 1 册最外一张纸：8|1 / 2|7，受损页 8
+        self.assertEqual(first["front"], {"left": 8, "right": 1})
+        self.assertEqual(first["back"], {"left": 2, "right": 7})
+        self.assertEqual(first["damaged_pages"], [8])
+        # 第 2 册最外一张纸：16|9 / 10|15，受损页 9、10
+        self.assertEqual(second["front"], {"left": 16, "right": 9})
+        self.assertEqual(second["back"], {"left": 10, "right": 15})
+        self.assertEqual(second["damaged_pages"], [9, 10])
+        # 第 3 册唯一一张纸：补白为 None，受损页 17
+        self.assertEqual(third["front"], {"left": None, "right": 17})
+        self.assertEqual(third["back"], {"left": None, "right": None})
+        self.assertEqual(third["damaged_pages"], [17])
+
+    def test_blank_pages_never_listed_as_damaged(self):
+        # 5 页补齐到 8 页：空白页位置不应出现在 damaged_pages 中
+        result = find_reprint_sheets(5, 10, [(1, 5)])
+        self.assertEqual(result["reprint_sheet_count"], 2)
+        for sheet in result["sheets"]:
+            self.assertTrue(all(p is not None for p in sheet["damaged_pages"]))
+        merged = sorted(p for s in result["sheets"] for p in s["damaged_pages"])
+        self.assertEqual(merged, [1, 2, 3, 4, 5])
+
+    def test_whole_book_damaged_reprints_every_sheet(self):
+        result = find_reprint_sheets(17, 2, [(1, 17)])
+        self.assertEqual(result["damaged_page_count"], 17)
+        self.assertEqual(result["reprint_sheet_count"], 2 + 2 + 1)
 
 
 if __name__ == "__main__":

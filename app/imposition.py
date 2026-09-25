@@ -145,3 +145,62 @@ def build_imposition(total_pages: int, max_sheets_per_booklet: int) -> dict:
         "total_sheets": sum(b.sheet_count for b in booklets),
         "booklets": result_booklets,
     }
+
+
+def find_reprint_sheets(
+    total_pages: int,
+    max_sheets_per_booklet: int,
+    damaged_ranges: list[tuple[int, int]],
+) -> dict:
+    """按现有分册与拼版规则，定位覆盖受损原稿页、需要整张补印的纸。
+
+    参数
+    ----
+    damaged_ranges:
+        受损原稿页区间 ``[(start_page, end_page), ...]``，1-based 闭区间，
+        允许交叠；调用方需保证 ``1 <= start_page <= end_page <= total_pages``。
+
+    返回
+    ----
+    需补印纸张列表，按分册序号、纸张从外到内排序，同一纸张只出现一次；
+    每项含分册 / 纸张序号、正反面左右原稿页码（补白为 ``None``）以及
+    落在该纸上的受损页码（升序、去重）。
+    """
+    damaged_pages: set[int] = set()
+    for start, end in damaged_ranges:
+        damaged_pages.update(range(start, end + 1))
+
+    imposition = build_imposition(total_pages, max_sheets_per_booklet)
+    reprints: list[dict] = []
+    for booklet in imposition["booklets"]:
+        for sheet in booklet["sheets"]:
+            front = sheet["front"]
+            back = sheet["back"]
+            hit = sorted(
+                page
+                for page in (
+                    front["left"],
+                    front["right"],
+                    back["left"],
+                    back["right"],
+                )
+                if page is not None and page in damaged_pages
+            )
+            if hit:
+                reprints.append(
+                    {
+                        "booklet_index": booklet["index"],
+                        "sheet_index": sheet["index"],
+                        "front": front,
+                        "back": back,
+                        "damaged_pages": hit,
+                    }
+                )
+
+    return {
+        "total_pages": total_pages,
+        "max_sheets_per_booklet": max_sheets_per_booklet,
+        "damaged_page_count": len(damaged_pages),
+        "reprint_sheet_count": len(reprints),
+        "sheets": reprints,
+    }
